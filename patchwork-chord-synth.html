@@ -2323,8 +2323,15 @@ $("#local").addEventListener("click", e => {
 
 function initMidi(){
   if (!navigator.requestMIDIAccess){
-    say("Web MIDI isn't available in this browser. Chrome, Edge and Safari 18+ support it; "
-      + "Firefox prompts for permission.", true);
+    /* Every iOS browser is WebKit underneath, so this is a platform limit rather than a
+       browser choice — naming Safari 18 here misleads anyone reading it on a phone. */
+    const ios = /iPad|iPhone|iPod/.test(navigator.platform)
+      || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
+    say(ios
+      ? "Web MIDI isn't available on iOS or iPadOS — every browser there uses WebKit, so "
+        + "switching browsers won't help. Everything else works; MIDI needs a desktop."
+      : "Web MIDI isn't available in this browser. Chrome and Edge support it, and Firefox "
+        + "prompts for permission.", true);
     return;
   }
   if (!window.isSecureContext){
