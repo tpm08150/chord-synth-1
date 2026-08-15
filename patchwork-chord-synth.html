@@ -261,6 +261,35 @@ input[type="text"]::placeholder{color:#5a646a}
 .step:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
 .opt-row select{width:auto;min-width:76px}
 
+/* horizontal fader — same behaviour as the bank's vertical ones, laid out to sit in a row */
+.hfader{
+  display:flex;align-items:center;gap:9px;cursor:ew-resize;touch-action:none;
+  padding:5px 9px;border-radius:6px;background:rgba(0,0,0,.13);
+}
+.hfader:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+.hfader .hlab{font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--silk-dim)}
+.hslot{
+  position:relative;width:130px;height:20px;border-radius:4px;
+  background:linear-gradient(180deg,#20262a,#12161a 45%,#20262a);
+  box-shadow:0 2px 4px rgba(0,0,0,.6) inset,0 1px 0 rgba(255,255,255,.06);
+}
+.hslot::after{
+  content:"";position:absolute;left:7px;right:7px;top:50%;height:3px;
+  transform:translateY(-50%);background:#0b0e10;border-radius:2px;
+}
+.hcap{
+  position:absolute;top:-3px;height:26px;width:22px;border-radius:3px;
+  left:calc(var(--v,.5) * (130px - 22px));
+  background:linear-gradient(180deg,#5b656b,#394247);border:1px solid #14181b;
+  box-shadow:0 2px 3px rgba(0,0,0,.55),0 1px 0 rgba(255,255,255,.18) inset;
+}
+.hcap::after{content:"";position:absolute;top:3px;bottom:3px;left:9px;width:3px;border-radius:2px;background:var(--cap-red)}
+.hfader.g2 .hcap::after{background:var(--cap-yellow)}   /* output control, matching the bank */
+.hfader .hval{font-family:"DM Mono";font-size:10px;color:#aeb8be;min-width:32px}
+.hfader .bind{font-family:"DM Mono";font-size:9px;color:var(--cap-yellow)}
+.hfader.dragging .hcap{box-shadow:0 0 0 1px var(--mint),0 2px 3px rgba(0,0,0,.55)}
+.hfader.arm{box-shadow:0 0 0 2px var(--cap-yellow) inset}
+
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--silk-dim);margin-top:14px}
 .legend span::before{content:"";display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:7px;background:var(--cap-red)}
 .legend span+span::before{background:var(--cap-yellow)}
@@ -460,6 +489,35 @@ body.learning .fader{cursor:crosshair}
     </div>
 
     <div class="faders" id="faders"></div>
+
+    <div class="motion-opts" id="bassOpts">
+      <div class="opt-row">
+        <span class="silk">Bass</span>
+        <div class="seg" id="bass" role="group" aria-label="Root bass note">
+          <button data-b="on" class="on">On</button>
+          <button data-b="off">Off</button>
+        </div>
+        <div class="hfader" id="bassSusFader" tabindex="0" role="slider"
+             aria-label="Bass decay" aria-valuemin="0" aria-valuemax="100">
+          <span class="hlab">Decay</span>
+          <div class="hslot"><div class="hcap"></div></div>
+          <span class="hval"></span>
+          <span class="bind"></span>
+        </div>
+        <div class="hfader g2" id="bassLvlFader" tabindex="0" role="slider"
+             aria-label="Bass level" aria-valuemin="0" aria-valuemax="100">
+          <span class="hlab">Level</span>
+          <div class="hslot"><div class="hcap"></div></div>
+          <span class="hval"></span>
+          <span class="bind"></span>
+        </div>
+      </div>
+      <div class="opt-row">
+        <span class="silk">Steps</span>
+        <select id="bassSteps" aria-label="Bass steps"></select>
+        <div class="steps" id="bassGrid"></div>
+      </div>
+    </div>
 
     <div class="legend"><span>Shape</span><span>Space &amp; output</span></div>
     <div class="hint">
@@ -818,8 +876,10 @@ function bassNote(ch, keyPc){
 /* ============ audio ============ */
 let ctx = null, master = null, dry = null, wet = null, verb = null, comp = null, cutSrc = null;
 const active = new Set();
-/* filter cutoff never drops below this, so the multiplicative envelope can't choke a bass note */
-const CUT_FLOOR = 80;
+/* Only a hair above zero — enough to keep the filter parameter positive, low enough that
+   fully-closed really is silent. (It used to be 80Hz to protect the bass fundamental,
+   which is exactly what stopped Tone from closing all the way.) */
+const CUT_FLOOR = 6;
 /* held pads run open-ended; this is just a safety stop so a stuck note can't ring forever */
 const HOLD_MAX = 40;
 
@@ -854,11 +914,30 @@ const VOICES = {
           filter:"highpass"}
 };
 
-const P = {tone:.58, attack:.22, release:.42, space:.42, spread:.4, level:.72};
-const state = {voice:"soft", motion:"hold", bpm:88, keyPc:0, prog:null, playing:false};
+/* bassLvl .5 is unity — it reproduces the gain the bass had before it was adjustable */
+/* tone .6755 solves to the same ~1965Hz the default has always had — re-derived each time
+   the Tone range changes, so widening the fader never shifts the default patch */
+const P = {tone:.6755, attack:.22, release:.42, bassSus:.7, bassLvl:.5, space:.42, spread:.4, level:.72};
+const BASS_UNITY = .13;
+const bassGain = () => BASS_UNITY * 2 * P.bassLvl;
+/* frozen defaults: a patch that omits a parameter should reset it, not inherit
+   whatever happened to be dialled in before the load */
+const P_DEFAULT = Object.assign({}, P);
+const state = {voice:"soft", motion:"hold", bpm:88, keyPc:0, prog:null, playing:false, bass:true};
+/* Patches have carried three different shapes for this: a boolean, then the brief
+   off/decay/sustain strings, now a boolean plus the Bass fader. Returns {on, sus},
+   where sus is null when the patch didn't pin one. */
+function normBass(v){
+  if (v === "off" || v === false) return {on:false, sus:null};
+  if (v === "sustain") return {on:true, sus:1};
+  if (v === "decay") return {on:true, sus:.7};
+  return {on:true, sus:null};
+}
 const MIDI = {access:null, in:null, out:null, ch:0, local:true, sync:"int"};
 /* steps divide the bar, so 4/8/12/16 read as quarters, eighths, triplets, sixteenths */
 const PULSE = {steps:8, on:[1,0,1,1,0,1,1,0]};
+/* default is a single hit on the downbeat — i.e. the original one-note-per-bar bass */
+const BASSQ = {steps:8, on:[1,0,0,0,0,0,0,0]};
 const ARP = {dir:"updown", octaves:1, rate:"auto"};
 /* "auto" keeps the adaptive behaviour: a sequence longer than a bar of eighths would never
    reach its top notes, so it doubles to sixteenths. Explicit rates divide the bar directly. */
@@ -910,7 +989,7 @@ function initAudio(){
   comp.connect(master); master.connect(ctx.destination);
   /* one shared cutoff signal every live note reads from, so Tone moves under sounding notes */
   cutSrc = ctx.createConstantSource();
-  cutSrc.offset.value = curve(P.tone, 260, 8500);
+  cutSrc.offset.value = toneHz();
   cutSrc.start();
   /* PeriodicWaves need the context, so they're built here rather than at parse time */
   periodic = {};
@@ -926,6 +1005,11 @@ function initAudio(){
    send sat around -23dB at the default and was effectively inaudible */
 function applySpace(){ if (wet) wet.gain.setTargetAtTime(P.space * 3, ctx.currentTime, .02); }
 const curve = (v,lo,hi) => lo * Math.pow(hi/lo, v);
+/* 25Hz shuts the sound off entirely; 16kHz is past anything the oscillators put out, so the
+   top of the fader is genuinely open. Voice `cut` multiplies this and BiquadFilterNode
+   clamps at Nyquist, so bell's 1.5x simply saturates rather than misbehaving. */
+const TONE_MIN = 25, TONE_MAX = 16000;
+const toneHz = () => curve(P.tone, TONE_MIN, TONE_MAX);
 const REL_MIN = .08, REL_MAX = 6;
 const relTime = () => Math.max(.06, curve(P.release, REL_MIN, REL_MAX));
 
@@ -942,10 +1026,26 @@ function trigger(midi, t, hold, opts){
   const freq = 440 * Math.pow(2,(midi-69)/12);
   const decEnd = Math.min(atk + Math.min(hold*.9, 1.6), hold * .99);
 
+  /* susAmt (0..1) gives a continuously variable envelope tail, used by the bass:
+       0    — falls to 2% in ~0.35s, a hard pluck
+       1    — no decay at all, holds at full level
+     Absent means the standard chord-note shape: dip to 72%, then hold. */
   const env = ctx.createGain();
   env.gain.setValueAtTime(0.0001, t);
   env.gain.linearRampToValueAtTime(peak, t + atk);
-  env.gain.linearRampToValueAtTime(peak * .72, t + decEnd);
+  let susLevel;
+  if (o.susAmt != null && o.susAmt >= .98){
+    susLevel = peak;
+  } else if (o.susAmt != null){
+    /* the fall time is capped so a plucked bass dies at the same rate whether the pad
+       is one bar or eight, instead of stretching to fit */
+    const fallEnd = Math.min(hold * .99, atk + curve(o.susAmt, .35, 4));
+    susLevel = Math.max(peak * curve(o.susAmt, .02, 1), .0002);
+    env.gain.exponentialRampToValueAtTime(susLevel, t + fallEnd);
+  } else {
+    susLevel = peak * .72;
+    env.gain.linearRampToValueAtTime(susLevel, t + decEnd);
+  }
 
   const filt = ctx.createBiquadFilter();
   /* the bass always stays lowpass — a bandpass or highpass voice would gut the low end */
@@ -956,7 +1056,9 @@ function trigger(midi, t, hold, opts){
   const cutEnv = ctx.createGain();
   cutEnv.gain.setValueAtTime(.55 * cutMul, t);
   cutEnv.gain.linearRampToValueAtTime(cutMul, t + atk + .04);
-  cutEnv.gain.exponentialRampToValueAtTime(.62 * cutMul, t + hold + rel);
+  /* the filter closing is the other half of the trail-off, so it tracks susAmt too */
+  const cutEnd = o.susAmt != null ? (.34 + .62 * o.susAmt) : .62;
+  cutEnv.gain.exponentialRampToValueAtTime(cutEnd * cutMul, t + hold + rel);
   cutSrc.connect(cutEnv);
   cutEnv.connect(filt.frequency);
 
@@ -984,13 +1086,13 @@ function trigger(midi, t, hold, opts){
   });
 
   const rec = {env, oscs, filt, pan, cutEnv, basePan, detMul, t, hold, peak, rel,
-               oscDet:specs.map(sp => sp[3] || 0)};
+               sus:susLevel, oscDet:specs.map(sp => sp[3] || 0)};
   /* the tail is re-schedulable so the Release fader can move under a sounding note */
   rec.tail = function(r){
     rec.rel = r;
     const end = rec.t + rec.hold + r;
     env.gain.cancelScheduledValues(rec.t + rec.hold);
-    env.gain.setValueAtTime(rec.peak * .72, rec.t + rec.hold);
+    env.gain.setValueAtTime(rec.sus, rec.t + rec.hold);
     env.gain.exponentialRampToValueAtTime(.0001, end);
     oscs.forEach(x => { try{ x.stop(end + .05); }catch(e){} });
   };
@@ -1036,7 +1138,7 @@ function refreshLive(id){
   if (!ctx) return;
   const now = ctx.currentTime;
   if (id === "tone"){
-    if (cutSrc) cutSrc.offset.setTargetAtTime(curve(P.tone, 260, 8500), now, .03);
+    if (cutSrc) cutSrc.offset.setTargetAtTime(toneHz(), now, .03);
   } else if (id === "spread"){
     const d = P.spread * 22;
     active.forEach(rec => {
@@ -1064,7 +1166,26 @@ function chordEvents(i, t){
   const notes = prog.voicings[i];
   const motion = state.motion;
 
-  const ev = [{n:bassNote(ch, state.keyPc), t:t, d:span*.92, bass:true, gain:.13, vel:76}];
+  /* Bass runs its own step sequence, repeating each bar like Pulse does. Each hit lasts
+     until the next one (or the end of the chord), and the Decay fader shapes that span —
+     so a single step at full decay is one note held under the whole bar, and a busier
+     pattern gives a bass line. Deliberately NOT swung: the Swing control only appears for
+     Arp and Pulse, and a hidden control shouldn't move these notes. */
+  const ev = [];
+  if (state.bass){
+    const bn = Math.max(1, BASSQ.steps);
+    const bStep = bar / bn;
+    const bTotal = Math.max(1, Math.round(bn * bars));
+    const hits = [];
+    for (let s = 0; s < bTotal; s++) if (BASSQ.on[s % bn]) hits.push(s * bStep);
+    hits.forEach((at, k) => {
+      const until = (k + 1 < hits.length) ? hits[k + 1] : span;
+      /* velocity tracks the level so external gear follows the same mix move */
+      ev.push({n:bassNote(ch, state.keyPc), t:t + at, d:Math.max(.05, (until - at) * .99),
+               bass:true, gain:bassGain(), susAmt:P.bassSus,
+               vel:Math.max(1, Math.min(127, Math.round(76 * P.bassLvl / .5)))});
+    });
+  }
   const spread = notes.length > 1 ? 1.2 / (notes.length - 1) : 0;
 
   if (motion === "hold" || motion === "strum"){
@@ -1122,7 +1243,7 @@ function arpSequence(notes){
 
 function scheduleChord(i, t){
   chordEvents(i, t).forEach(e => {
-    if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan});
+    if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
     sendNote(e.n, e.t, e.d, e.vel);
   });
 }
@@ -1184,16 +1305,23 @@ function paint(){
   requestAnimationFrame(paint);
 }
 
-/* playhead on the step sequencer, derived from the bar's progress */
+/* playhead on both step grids, derived from progress through the current chord */
 function paintSteps(cur, now){
-  if (state.motion !== "pulse") return;
-  const steps = stepGrid.children;
-  const idx = cur ? Math.min(PULSE.steps - 1,
-    Math.floor(((now - cur.t) / (cur.end - cur.t)) * PULSE.steps)) : -1;
-  for (let s = 0; s < steps.length; s++) steps[s].classList.toggle("now", s === idx);
+  const frac = cur ? (now - cur.t) / (cur.end - cur.t) : -1;
+  const mark = (el, cfg, active) => {
+    /* patterns repeat per bar, so wrap the position by the chord's length in bars */
+    const bars = cur ? Math.max(1, chordBars(cur.i)) : 1;
+    const idx = (active && frac >= 0)
+      ? Math.floor(frac * cfg.steps * bars) % cfg.steps : -1;
+    for (let s = 0; s < el.children.length; s++)
+      el.children[s].classList.toggle("now", s === idx);
+  };
+  mark(stepGrid, PULSE, state.motion === "pulse");
+  mark(bassGrid, BASSQ, state.bass);
 }
 function clearSteps(){
   for (const b of stepGrid.children) b.classList.remove("now");
+  for (const b of bassGrid.children) b.classList.remove("now");
 }
 
 /* One-shot trigger for a click, a key press or a pad. Runs the SAME event list the
@@ -1205,7 +1333,7 @@ function stab(i){
   if (ctx.state === "suspended") ctx.resume();
   const t = ctx.currentTime + .02;   // nudge off "now" so nothing schedules into the past
   chordEvents(i, t).forEach(e => {
-    if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan});
+    if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
     sendNote(e.n, e.t, e.d, e.vel);
   });
 }
@@ -1215,9 +1343,25 @@ const $ = s => document.querySelector(s);
 const chordsEl = $("#chords"), metaEl = $("#meta"), playBtn = $("#play"), keySel = $("#key"), moodSel = $("#mood"), tempoOut = $("#tempoOut"), lenSel = $("#len"), modeSel = $("#mode"), modeNote = $("#modeNote"), totalBarsEl = $("#totalBars");
 
 const title = s => s.charAt(0).toUpperCase() + s.slice(1);
-/* build the mood list from POOLS so adding a pool adds its option automatically */
-MOODS.forEach(m => moodSel.appendChild(
-  Object.assign(document.createElement("option"), {value:m, textContent:title(m)})));
+
+/* Only list moods that can actually satisfy the selected mode — offering Dusk under
+   "Major" just to report a fallback afterwards is confusing. Built from POOLS, so a new
+   pool appears automatically and lands in the right lists. */
+function syncMoodOptions(){
+  const wantMinor = modeSel.value === "minor" ? true
+                  : modeSel.value === "major" ? false : null;
+  const allowed = wantMinor === null ? MOODS : MOODS.filter(m => moodHas(m, wantMinor));
+  const prev = moodSel.value;
+  moodSel.innerHTML = "";
+  moodSel.appendChild(Object.assign(document.createElement("option"),
+    {value:"any", textContent:"Anything"}));
+  allowed.forEach(m => moodSel.appendChild(
+    Object.assign(document.createElement("option"), {value:m, textContent:title(m)})));
+  const kept = prev === "any" || allowed.indexOf(prev) >= 0;
+  moodSel.value = kept ? prev : "any";
+  return kept ? null : prev;    // the mood that had to be dropped, if any
+}
+syncMoodOptions();
 
 /* 12 is the ceiling because 3 wide x 4 rows is exactly the EP-133's pad grid */
 lenSel.appendChild(Object.assign(document.createElement("option"), {value:"auto", textContent:"Auto"}));
@@ -1237,7 +1381,7 @@ keySel.appendChild(rand);
 keySel.value = "0";
 
 const FADERS = [
-  {id:"tone",    lab:"Tone",    g:1, fmt:v => Math.round(curve(v,260,8500)) + "Hz"},
+  {id:"tone",    lab:"Tone",    g:1, fmt:v => Math.round(curve(v,TONE_MIN,TONE_MAX)) + "Hz"},
   {id:"attack",  lab:"Attack",  g:1, fmt:v => (curve(v,.004,1.4)*1000 < 999 ? Math.round(curve(v,.004,1.4)*1000)+"ms" : curve(v,.004,1.4).toFixed(2)+"s")},
   {id:"release", lab:"Release", g:1, fmt:v => curve(v,REL_MIN,REL_MAX).toFixed(2)+"s"},
   {id:"space",   lab:"Space",   g:2, fmt:v => Math.round(v*100)+"%"},
@@ -1251,7 +1395,7 @@ FADERS.forEach(f => {
   el.className = "fader g" + f.g;
   el.tabIndex = 0;
   el.setAttribute("role","slider");
-  el.setAttribute("aria-label", f.lab);
+  el.setAttribute("aria-label", f.aria || f.lab);
   el.setAttribute("aria-valuemin","0");
   el.setAttribute("aria-valuemax","100");
   el.innerHTML = '<div class="slot"><div class="cap"></div></div><div class="lab">'+f.lab+'</div><div class="val"></div><div class="bind"></div>';
@@ -1297,6 +1441,54 @@ FADERS.forEach(f => {
   });
   faderCtl[f.id] = {set, el};
   render();
+});
+
+/* Horizontal faders live outside the bank but register in the same place, so MIDI learn,
+   patch save and CC control all treat them exactly like the vertical ones. */
+function makeHFader(sel, param, fmt){
+  const el = $(sel), slot = el.querySelector(".hslot"),
+        cap = el.querySelector(".hcap"), val = el.querySelector(".hval");
+  function render(){
+    cap.style.setProperty("--v", P[param]);
+    val.textContent = fmt(P[param]);
+    el.setAttribute("aria-valuenow", Math.round(P[param] * 100));
+    el.setAttribute("aria-valuetext", fmt(P[param]));
+  }
+  function set(v){ P[param] = Math.min(1, Math.max(0, v)); render(); }
+  function fromEvent(e){
+    const r = slot.getBoundingClientRect();
+    set((e.clientX - r.left - 11) / (r.width - 22));
+  }
+  el.addEventListener("pointerdown", e => {
+    if (LEARN.on){ arm({type:"fader", id:param}, el); e.preventDefault(); return; }
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("dragging");
+    fromEvent(e); e.preventDefault();
+  });
+  el.addEventListener("pointermove", e => { if (el.hasPointerCapture(e.pointerId)) fromEvent(e); });
+  el.addEventListener("pointerup", e => { el.classList.remove("dragging"); el.releasePointerCapture(e.pointerId); });
+  el.addEventListener("keydown", e => {
+    const k = e.key;
+    if (k === "ArrowRight" || k === "ArrowUp") set(P[param] + .02);
+    else if (k === "ArrowLeft" || k === "ArrowDown") set(P[param] - .02);
+    else if (k === "PageUp") set(P[param] + .1);
+    else if (k === "PageDown") set(P[param] - .1);
+    else if (k === "Home") set(0);
+    else if (k === "End") set(1);
+    else return;
+    e.preventDefault();
+  });
+  faderCtl[param] = {set, el};
+  render();
+}
+
+makeHFader("#bassSusFader", "bassSus",
+  v => v >= .98 ? "hold" : Math.round(curve(v, .02, 1) * 100) + "%");
+/* dB against unity at the midpoint, which is how a level control should read */
+makeHFader("#bassLvlFader", "bassLvl", v => {
+  if (v <= 0) return "off";
+  const db = 20 * Math.log10(v / .5);
+  return (db > 0 ? "+" : "") + db.toFixed(1) + " dB";
 });
 
 function buildVoicings(prog){
@@ -1530,7 +1722,15 @@ keySel.addEventListener("change", () => {
 });
 moodSel.addEventListener("change", newProgression);
 lenSel.addEventListener("change", newProgression);
-modeSel.addEventListener("change", newProgression);
+modeSel.addEventListener("change", () => {
+  const dropped = syncMoodOptions();
+  newProgression();
+  if (dropped){
+    modeNote.style.display = "";
+    modeNote.textContent = title(dropped) + " has no " + modeSel.value
+      + " progressions, so it's not offered in this mode — switched to Anything.";
+  }
+});
 
 $("#voice").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
@@ -1542,6 +1742,12 @@ $("#motion").addEventListener("click", e => {
   state.motion = b.dataset.m;
   $("#motion").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
   syncMotionOpts();
+});
+
+$("#bass").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  state.bass = b.dataset.b === "on";
+  $("#bass").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
 });
 
 /* ---- arp & pulse options ---- */
@@ -1579,44 +1785,59 @@ swingSel.addEventListener("change", () => {
   updateSwingHint();
 });
 
-const stepGrid = $("#stepGrid"), pulseStepsSel = $("#pulseSteps");
-[4,6,8,12,16].forEach(n => pulseStepsSel.appendChild(
-  Object.assign(document.createElement("option"), {value:String(n), textContent:n + " steps"})));
-pulseStepsSel.value = String(PULSE.steps);
+const stepGrid = $("#stepGrid"), pulseStepsSel = $("#pulseSteps"),
+      bassGrid = $("#bassGrid"), bassStepsSel = $("#bassSteps");
 
-function buildStepGrid(){
-  stepGrid.innerHTML = "";
-  const perBeat = PULSE.steps / 4;
-  for (let s = 0; s < PULSE.steps; s++){
+/* Pulse and Bass are the same widget over different data */
+function fillStepCounts(sel, cfg){
+  [4,6,8,12,16].forEach(n => sel.appendChild(
+    Object.assign(document.createElement("option"), {value:String(n), textContent:n + " steps"})));
+  sel.value = String(cfg.steps);
+}
+function renderSteps(el, cfg){
+  el.innerHTML = "";
+  const perBeat = cfg.steps / 4;
+  for (let s = 0; s < cfg.steps; s++){
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "step" + (PULSE.on[s] ? " on" : "")
+    b.className = "step" + (cfg.on[s] ? " on" : "")
                 + (perBeat >= 1 && s % perBeat === 0 ? " beat" : "");
     b.dataset.s = s;
     b.setAttribute("aria-label", "Step " + (s + 1));
-    b.setAttribute("aria-pressed", PULSE.on[s] ? "true" : "false");
-    stepGrid.appendChild(b);
+    b.setAttribute("aria-pressed", cfg.on[s] ? "true" : "false");
+    el.appendChild(b);
   }
 }
-
-function setSteps(n){
-  const old = PULSE.on.slice();
-  PULSE.steps = n;
+function wireSteps(el, cfg){
+  el.addEventListener("click", e => {
+    const b = e.target.closest(".step"); if (!b) return;
+    const s = parseInt(b.dataset.s, 10);
+    cfg.on[s] = cfg.on[s] ? 0 : 1;
+    b.classList.toggle("on", !!cfg.on[s]);
+    b.setAttribute("aria-pressed", cfg.on[s] ? "true" : "false");
+  });
+}
+function setStepCount(cfg, el, n){
+  const old = cfg.on.slice();
+  cfg.steps = n;
   /* repeat the old pattern rather than blanking it — 8→16 should feel like the same
      groove at double resolution, not like the sequencer got wiped */
-  PULSE.on = Array.from({length:n}, (_, i) => old[i % old.length] || 0);
-  buildStepGrid();
-  updateSwingHint();
+  cfg.on = Array.from({length:n}, (_, i) => old[i % old.length] || 0);
+  renderSteps(el, cfg);
 }
+function buildStepGrid(){ renderSteps(stepGrid, PULSE); }
 
-stepGrid.addEventListener("click", e => {
-  const b = e.target.closest(".step"); if (!b) return;
-  const s = parseInt(b.dataset.s, 10);
-  PULSE.on[s] = PULSE.on[s] ? 0 : 1;
-  b.classList.toggle("on", !!PULSE.on[s]);
-  b.setAttribute("aria-pressed", PULSE.on[s] ? "true" : "false");
+fillStepCounts(pulseStepsSel, PULSE);
+fillStepCounts(bassStepsSel, BASSQ);
+wireSteps(stepGrid, PULSE);
+wireSteps(bassGrid, BASSQ);
+renderSteps(bassGrid, BASSQ);
+pulseStepsSel.addEventListener("change", () => {
+  setStepCount(PULSE, stepGrid, parseInt(pulseStepsSel.value, 10));
+  updateSwingHint();
 });
-pulseStepsSel.addEventListener("change", () => setSteps(parseInt(pulseStepsSel.value, 10)));
+bassStepsSel.addEventListener("change", () =>
+  setStepCount(BASSQ, bassGrid, parseInt(bassStepsSel.value, 10)));
 
 $("#arpDir").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
@@ -1770,11 +1991,13 @@ function arm(target, el){
 }
 
 function refreshBinds(){
-  FADERS.forEach(f => {
-    const ctl = faderCtl[f.id]; if (!ctl) return;
+  /* keyed off the registry, not FADERS, so the Bass decay control is covered too */
+  Object.keys(faderCtl).forEach(id => {
+    const ctl = faderCtl[id]; if (!ctl) return;
     let cc = null;
-    for (const [c, id] of ccMap) if (id === f.id) cc = c;
-    ctl.el.querySelector(".bind").textContent = cc == null ? "" : "CC " + cc;
+    for (const [c, fid] of ccMap) if (fid === id) cc = c;
+    const b = ctl.el.querySelector(".bind");
+    if (b) b.textContent = cc == null ? "" : "CC " + cc;
   });
   if (state.prog) renderProgression();   // pad badges live in the chord markup
 }
@@ -1871,7 +2094,7 @@ function padTick(){
       chordEvents(a.slot, a.next).forEach(e => {
         if (MIDI.local){
           const g = (e.gain != null ? e.gain : VOICES[state.voice].lvl) * amp;
-          a.recs.push(trigger(e.n, e.t, e.d, {bass:e.bass, gain:g, pan:e.pan}));
+          a.recs.push(trigger(e.n, e.t, e.d, {bass:e.bass, gain:g, pan:e.pan, susAmt:e.susAmt}));
         }
         sendNote(e.n, e.t, e.d, Math.round(e.vel * (a.vel / 127)));
       });
@@ -1887,7 +2110,7 @@ function padOn(n, vel){
 
   const ch = state.prog.chords[i];
   const notes = state.prog.voicings[i];
-  const outNotes = [bassNote(ch, state.keyPc)].concat(notes);
+  const outNotes = (state.bass ? [bassNote(ch, state.keyPc)] : []).concat(notes);
 
   if (padLooping()){
     initAudio();
@@ -1912,7 +2135,10 @@ function padOn(n, vel){
     const amp = .35 + .65 * (vel / 127);
     const spread = notes.length > 1 ? 1.2 / (notes.length - 1) : 0;
     const off = state.motion === "strum" ? .045 : .012;
-    recs.push(trigger(outNotes[0], ctx.currentTime, HOLD_MAX, {bass:true, gain:.13 * amp}));
+    if (state.bass){
+      recs.push(trigger(bassNote(ch, state.keyPc), ctx.currentTime, HOLD_MAX,
+        {bass:true, gain:bassGain() * amp, susAmt:P.bassSus}));
+    }
     notes.forEach((nn, k) => recs.push(
       trigger(nn, ctx.currentTime + k*off, HOLD_MAX, {pan:-0.6 + k*spread, gain:VOICES[state.voice].lvl * amp})
     ));
@@ -2303,7 +2529,9 @@ if (navigator.mediaDevices && navigator.mediaDevices.addEventListener){
 
 /* ============ patches ============ */
 const PATCH_KEY = "patchwork-cs1-patches";
-const PATCH_VERSION = 1;
+const PATCH_VERSION = 3;
+/* Tone range as it stood in each earlier patch version, used to migrate saved values */
+const TONE_RANGES = {1:[260, 8500], 2:[25, 8500]};
 const patchSel = $("#patchSel"), patchName = $("#patchName"), patchNote = $("#patchNote"),
       patchFile = $("#patchFile");
 
@@ -2327,10 +2555,11 @@ function snapshot(){
     app:"patchwork-cs1", v:PATCH_VERSION,
     key:keySel.value, keyPc:state.keyPc,
     mood:moodSel.value, mode:modeSel.value, len:lenSel.value,
-    bpm:state.bpm, voice:state.voice, motion:state.motion,
+    bpm:state.bpm, voice:state.voice, motion:state.motion, bass:state.bass,
     params:Object.assign({}, P),
     arp:Object.assign({}, ARP),
     pulse:{steps:PULSE.steps, on:PULSE.on.slice()},
+    bassSeq:{steps:BASSQ.steps, on:BASSQ.on.slice()},
     swing:SW.ratio,
     prog:state.prog ? {
       mood:state.prog.mood, minor:!!state.prog.minor,
@@ -2351,21 +2580,40 @@ function restore(s){
   keySel.value = (s.key === "rand" || /^\d+$/.test(String(s.key))) ? String(s.key) : "0";
   state.keyPc = clamp(s.keyPc, 0, 11, 0) | 0;
   if (keySel.value !== "rand") state.keyPc = parseInt(keySel.value, 10);
-  moodSel.value = oneOf(s.mood, moodNames, "any");
+  /* mode first — it decides which moods are even listed — then re-apply the saved mood
+     if it survived the filter, so an incompatible patch degrades instead of breaking */
   modeSel.value = oneOf(s.mode, ["auto","major","minor"], "auto");
+  syncMoodOptions();
+  const wantMood = oneOf(s.mood, moodNames, "any");
+  moodSel.value = [...moodSel.options].some(o => o.value === wantMood) ? wantMood : "any";
   lenSel.value  = oneOf(String(s.len), ["auto","3","4","5","6","7","8","9","10","11","12"], "auto");
 
   state.voice  = oneOf(s.voice, Object.keys(VOICES), "soft");
   state.motion = oneOf(s.motion, ["hold","strum","arp","pulse"], "hold");
+  const bassPatch = normBass(s.bass);
+  state.bass = bassPatch.on;
+  /* an off/decay/sustain-era patch pins the fader; newer ones carry it in params */
+  if (bassPatch.sus != null && (!s.params || s.params.bassSus == null)) P.bassSus = bassPatch.sus;
   syncSeg("#voice", "v", state.voice);
   syncSeg("#motion", "m", state.motion);
+  syncSeg("#bass", "b", state.bass ? "on" : "off");
 
-  if (s.params && typeof s.params === "object"){
-    FADERS.forEach(f => {
-      const v = clamp(s.params[f.id], 0, 1, P[f.id]);
-      if (faderCtl[f.id]) faderCtl[f.id].set(v); else P[f.id] = v;
-    });
+  /* always run this, even with no params block — it's what re-renders the fader caps,
+     and it has to happen after the bass fallback above so that value survives */
+  const sp = Object.assign({}, (s.params && typeof s.params === "object") ? s.params : {});
+  /* A tone position only means a cutoff relative to the range in force when it was saved.
+     Work out the Hz the patch meant, then re-solve it against the current range, so a
+     patch keeps sounding the way it was saved however often the range is widened. */
+  const pv = +s.v || 1;
+  if (pv < PATCH_VERSION && typeof sp.tone === "number"){
+    const was = TONE_RANGES[pv] || TONE_RANGES[1];
+    const hz = was[0] * Math.pow(was[1] / was[0], Math.min(1, Math.max(0, sp.tone)));
+    sp.tone = Math.log(hz / TONE_MIN) / Math.log(TONE_MAX / TONE_MIN);
   }
+  Object.keys(P_DEFAULT).forEach(id => {   // keyed off defaults, so every param resets
+    const v = clamp(sp[id], 0, 1, P_DEFAULT[id]);
+    if (faderCtl[id]) faderCtl[id].set(v); else P[id] = v;
+  });
 
   ARP.dir     = oneOf(s.arp && s.arp.dir, ["up","down","updown","random"], "updown");
   ARP.octaves = clamp(s.arp && s.arp.octaves, 1, 3, 1) | 0;
@@ -2381,6 +2629,14 @@ function restore(s){
     (s.pulse && Array.isArray(s.pulse.on) && s.pulse.on[i]) ? 1 : 0);
   pulseStepsSel.value = String(steps);
   buildStepGrid();
+
+  const bSteps = oneOf(s.bassSeq && s.bassSeq.steps, [4,6,8,12,16], 8);
+  BASSQ.steps = bSteps;
+  BASSQ.on = Array.from({length:bSteps}, (_, i) =>
+    (s.bassSeq && Array.isArray(s.bassSeq.on)) ? (s.bassSeq.on[i] ? 1 : 0)
+                                               : (i === 0 ? 1 : 0));   // older patches
+  bassStepsSel.value = String(bSteps);
+  renderSteps(bassGrid, BASSQ);
 
   SW.ratio = clamp(s.swing, .5, .75, .5);
   swingSel.value = SWING_OPTS.some(o => o[0] === SW.ratio) ? String(SW.ratio) : ".5";
