@@ -1003,6 +1003,17 @@ function initAudio(){
 }
 /* 3x, not .85x — the ConvolverNode normalizes a 2.8s noise IR down hard, so the old
    send sat around -23dB at the default and was effectively inaudible */
+/* iOS parks the context in "suspended" until a gesture, and in "interrupted" after a call
+   or an app switch — so anything other than "running" needs a resume, not just "suspended". */
+function ensureAudio(){
+  initAudio();
+  if (ctx.state !== "running"){
+    const p = ctx.resume();
+    if (p && p.catch) p.catch(() => {});
+  }
+  return ctx.state;
+}
+
 function applySpace(){ if (wet) wet.gain.setTargetAtTime(P.space * 3, ctx.currentTime, .02); }
 const curve = (v,lo,hi) => lo * Math.pow(hi/lo, v);
 /* 25Hz shuts the sound off entirely; 16kHz is past anything the oscillators put out, so the
@@ -1251,8 +1262,7 @@ function scheduleChord(i, t){
 /* ---- transport ---- */
 let timer = null, nextTime = 0, nextIndex = 0, marks = [];
 function startPlay(){
-  initAudio();
-  if (ctx.state === "suspended") ctx.resume();
+  ensureAudio();
   state.playing = true;
   nextIndex = 0;
   nextTime = ctx.currentTime + .08;
@@ -1329,8 +1339,7 @@ function clearSteps(){
    they used to be silently flattened to Hold here. */
 function stab(i){
   if (!state.prog) return;
-  initAudio();
-  if (ctx.state === "suspended") ctx.resume();
+  ensureAudio();
   const t = ctx.currentTime + .02;   // nudge off "now" so nothing schedules into the past
   chordEvents(i, t).forEach(e => {
     if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
@@ -2113,8 +2122,7 @@ function padOn(n, vel){
   const outNotes = (state.bass ? [bassNote(ch, state.keyPc)] : []).concat(notes);
 
   if (padLooping()){
-    initAudio();
-    if (ctx.state === "suspended") ctx.resume();
+    ensureAudio();
     const a = {slot:i, vel, recs:[], next:ctx.currentTime + .02};
     arping.set(n, a);
     held.set(n, {recs:a.recs, outNotes, slot:i, arp:true});
@@ -2130,8 +2138,7 @@ function padOn(n, vel){
   }
   const recs = [];
   if (MIDI.local){
-    initAudio();
-    if (ctx.state === "suspended") ctx.resume();
+    ensureAudio();
     const amp = .35 + .65 * (vel / 127);
     const spread = notes.length > 1 ? 1.2 / (notes.length - 1) : 0;
     const off = state.motion === "strum" ? .045 : .012;
@@ -2383,7 +2390,10 @@ function startMeter(){
 function ioStats(){
   const el = $("#ioStats");
   if (!ctx){ el.innerHTML = ""; return; }
-  const bits = ["rate <b>" + (ctx.sampleRate / 1000).toFixed(1) + " kHz</b>"];
+  /* first thing to read when there's no sound — on iOS this sits at "suspended" until a
+     gesture, and drops to "interrupted" after a call or an app switch */
+  const bits = ["audio <b" + (ctx.state === "running" ? ">" : " style=\"color:#e8b23a\">") + ctx.state + "</b>",
+                "rate <b>" + (ctx.sampleRate / 1000).toFixed(1) + " kHz</b>"];
   if (ctx.baseLatency != null)   bits.push("buffer <b>" + (ctx.baseLatency * 1000).toFixed(1) + " ms</b>");
   if (ctx.outputLatency != null) bits.push("output <b>" + (ctx.outputLatency * 1000).toFixed(1) + " ms</b>");
   if (inStream){
@@ -2465,8 +2475,24 @@ function closeInput(){
 
 /* rAF is paused while the tab is hidden; pick the meter back up when it returns */
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && inAnalyser) startMeter();
+  if (document.hidden) return;
+  if (inAnalyser) startMeter();
+  /* iOS interrupts the context on an app switch or a call and does not restore it */
+  if (ctx && ctx.state !== "running" && state.playing){
+    const p = ctx.resume();
+    if (p && p.catch) p.catch(() => {});
+  }
+  ioStats();
 });
+
+/* Safety net: any tap re-resumes an existing context. Deliberately does not create one —
+   audio should still only start when the player actually asks for a sound. */
+["pointerdown","touchend"].forEach(ev => document.addEventListener(ev, () => {
+  if (ctx && ctx.state !== "running"){
+    const p = ctx.resume();
+    if (p && p.catch) p.catch(() => {});
+  }
+}, {passive:true}));
 
 function applyMonitor(){
   if (!inDry || !ctx) return;
@@ -2479,7 +2505,7 @@ async function openInput(id){
   closeInput();
   if (!id) { ioSay("Input closed."); return; }
   initAudio();
-  if (ctx.state === "suspended") await ctx.resume();
+  if (ctx.state !== "running") await ctx.resume();
   try{
     inStream = await navigator.mediaDevices.getUserMedia({
       audio:{
