@@ -1,0 +1,17 @@
+# Static site — no build step, the whole app is one HTML file.
+[build]
+  publish = "."
+
+# Serve the app at the root without renaming it. status = 200 rewrites rather than
+# redirecting, so the URL stays clean.
+[[redirects]]
+  from = "/"
+  to = "/patchwork-chord-synth.html"
+  status = 200
+
+# The app is a single file that changes on every deploy — never let a browser hold
+# a stale copy. (Learned the hard way against a local dev server.)
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

@@ -1,0 +1,6 @@
+.DS_Store
+.claude/
+node_modules/
+
+# scratch fixtures used while testing (mock MIDI ports, blank pages)
+_*.html
