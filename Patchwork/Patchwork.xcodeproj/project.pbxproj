@@ -268,14 +268,17 @@
 /* Begin PBXShellScriptBuildPhase section */
 		CEB4AA0130312800A0000001 /* Sync web app from repo root */ = {
 			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputPaths = (
+				"$(SRCROOT)/../patchwork-chord-synth.html",
+				"$(SRCROOT)/../ios/midi-bridge.js",
 			);
 			name = "Sync web app from repo root";
 			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/patchwork-chord-synth.html",
+				"$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/midi-bridge.js",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

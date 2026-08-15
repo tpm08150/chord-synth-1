@@ -115,8 +115,11 @@ final class MIDIBridge {
             guard let base = raw.baseAddress else { return }
             let list = base.assumingMemoryBound(to: MIDIPacketList.self)
             var packet = MIDIPacketListInit(list)
+            // MIDIPacketListAdd returns a non-optional pointer in Swift, so there is
+            // nothing to nil-check — the buffer is fixed at 1024 and messages are 3 bytes.
             packet = MIDIPacketListAdd(list, 1024, packet, timestamp, bytes.count, bytes)
-            if packet != nil { MIDISend(outputPort, dest, list) }
+            _ = packet
+            MIDISend(outputPort, dest, list)
         }
     }
 
