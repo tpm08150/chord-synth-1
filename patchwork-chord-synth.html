@@ -380,7 +380,6 @@ body.learning .fader{cursor:crosshair}
   <div class="transport">
     <button class="btn primary" id="gen">New progression</button>
     <button class="btn play" id="play">▶ Play</button>
-    <button class="btn ghost" id="copy">Copy</button>
   </div>
 
   <div class="row">
@@ -448,6 +447,10 @@ body.learning .fader{cursor:crosshair}
           <button data-v="organ">Organ</button>
           <button data-v="wood">Wood</button>
           <button data-v="vapor">Vapor</button>
+          <button data-v="neon">Neon</button>
+          <button data-v="chrome">Chrome</button>
+          <button data-v="brass">Brass</button>
+          <button data-v="halo">Halo</button>
         </div>
         <div class="seg" id="motion" role="group" aria-label="Motion">
           <button data-m="hold" class="on">Hold</button>
@@ -532,10 +535,6 @@ body.learning .fader{cursor:crosshair}
         <button class="btn sm panic" id="panic" title="Send all-notes-off on every channel">Panic</button>
         <button class="btn ghost sm learn" id="learn" aria-pressed="false">Learn</button>
         <button class="btn ghost sm" id="clearMap">Clear map</button>
-        <div class="seg" id="sync" role="group" aria-label="Clock source">
-          <button data-s="int" class="on">Int clock</button>
-          <button data-s="ext">MIDI clock</button>
-        </div>
         <div style="display:flex;gap:7px;align-items:center">
           <span class="silk">Offset</span>
           <div class="tempo" style="width:126px">
@@ -559,13 +558,6 @@ body.learning .fader{cursor:crosshair}
       <div class="field" style="flex:0 0 74px">
         <label for="midiCh">Channel</label>
         <select id="midiCh"></select>
-      </div>
-      <div class="field" style="flex:0 0 auto">
-        <span class="silk">Local</span>
-        <div class="seg" id="local" role="group" aria-label="Local synth">
-          <button data-l="on" class="on">On</button>
-          <button data-l="off">Off</button>
-        </div>
       </div>
     </div>
 
@@ -919,7 +911,21 @@ const VOICES = {
   /* highpass thins the body out, leaving the upper partials */
   vapor: {oscs:[["triangle",12,.4],["sine",19,.24],["triangle",0,.22]],
                                                                 cut:.35, q:.7,  lvl:.16,
-          filter:"highpass"}
+          filter:"highpass"},
+
+  /* --- big synth chords --- */
+  /* the supersaw: four saws pulled ±19 cents apart, plus a sub for weight */
+  neon:  {oscs:[["sawtooth",0,.24,-19],["sawtooth",0,.24,19],
+                ["sawtooth",0,.20,-7],["sawtooth",-12,.18,7]], cut:1.3, q:.7,  lvl:.30},
+  /* squares beating against each other, with a saw octave up for glass on top */
+  chrome:{oscs:[["square",0,.26,-11],["square",0,.26,11],
+                ["sawtooth",12,.12,0],["square",-12,.16,0]],    cut:1.55,q:.9,  lvl:.20},
+  /* resonant and darker so the filter envelope reads as a brass swell */
+  brass: {oscs:[["sawtooth",0,.34,-7],["sawtooth",0,.34,7],
+                ["sawtooth",-12,.20,0]],                        cut:.75, q:2.0, lvl:.23},
+  /* wide and shimmering — the octave-and-a-fifth partial is what makes it sound huge */
+  halo:  {oscs:[["triangle",0,.30,-13],["triangle",0,.30,13],
+                ["sine",19,.14,0],["triangle",-12,.20,0]],      cut:1.15,q:.5,  lvl:.22}
 };
 
 /* bassLvl .5 is unity — it reproduces the gain the bass had before it was adjustable */
@@ -941,7 +947,7 @@ function normBass(v){
   if (v === "decay") return {on:true, sus:.7};
   return {on:true, sus:null};
 }
-const MIDI = {access:null, in:null, out:null, ch:0, local:true, sync:"int"};
+const MIDI = {access:null, in:null, out:null, ch:0, sync:"int"};
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.platform)
             || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
 /* Shifts the transport's grid against incoming MIDI clock. Browser output latency puts
@@ -1275,7 +1281,7 @@ function arpSequence(notes){
 
 function scheduleChord(i, t){
   chordEvents(i, t).forEach(e => {
-    if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
+    trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
     sendNote(e.n, e.t, e.d, e.vel);
   });
 }
@@ -1286,7 +1292,10 @@ function startPlay(){
   ensureAudio();
   state.playing = true;
   nextIndex = 0;
-  nextTime = ctx.currentTime + .08;
+  /* Just enough that the first chord isn't scheduled into the past — the tick runs every
+     25ms. This used to be 80ms, which was the dominant term in the clock offset people
+     had to dial out, and pure delay on the Play button besides. */
+  nextTime = ctx.currentTime + .03;
   marks = [];
   tick();
   timer = setInterval(tick, 25);
@@ -1368,7 +1377,7 @@ function stab(i){
   ensureAudio();
   const t = ctx.currentTime + .02;   // nudge off "now" so nothing schedules into the past
   chordEvents(i, t).forEach(e => {
-    if (MIDI.local) trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
+    trigger(e.n, e.t, e.d, {bass:e.bass, gain:e.gain, pan:e.pan, susAmt:e.susAmt});
     sendNote(e.n, e.t, e.d, e.vel);
   });
 }
@@ -1730,17 +1739,6 @@ function newProgression(){
 
 $("#gen").addEventListener("click", () => { newProgression(); if (!state.playing) startPlay(); });
 playBtn.addEventListener("click", () => state.playing ? stopPlay() : startPlay());
-$("#copy").addEventListener("click", async () => {
-  const m = keyMinor();
-  const txt = state.prog.chords.map(c => chordName(c, state.keyPc, m)).join("  –  ")
-    + "   (" + noteName(state.keyPc, state.keyPc, m) + ", " + state.bpm + " bpm)";
-  try{
-    await navigator.clipboard.writeText(txt);
-    const b = $("#copy"); b.textContent = "Copied"; setTimeout(() => b.textContent = "Copy", 1200);
-  }catch(e){
-    const b = $("#copy"); b.textContent = "Press ⌘C"; setTimeout(() => b.textContent = "Copy", 1600);
-  }
-});
 
 function setBpm(v){
   state.bpm = Math.min(180, Math.max(50, Math.round(v)));
@@ -2127,10 +2125,8 @@ function padTick(){
     let guard = 0;
     while (a.next < horizon && guard++ < 8){
       chordEvents(a.slot, a.next).forEach(e => {
-        if (MIDI.local){
-          const g = (e.gain != null ? e.gain : VOICES[state.voice].lvl) * amp;
-          a.recs.push(trigger(e.n, e.t, e.d, {bass:e.bass, gain:g, pan:e.pan, susAmt:e.susAmt}));
-        }
+        const g = (e.gain != null ? e.gain : VOICES[state.voice].lvl) * amp;
+        a.recs.push(trigger(e.n, e.t, e.d, {bass:e.bass, gain:g, pan:e.pan, susAmt:e.susAmt}));
         sendNote(e.n, e.t, e.d, Math.round(e.vel * (a.vel / 127)));
       });
       a.next += barSeconds() * chordBars(a.slot);
@@ -2163,7 +2159,7 @@ function padOn(n, vel){
     try{ outNotes.forEach(p => MIDI.out.send([0x90 | MIDI.ch, p, vel])); }catch(e){}
   }
   const recs = [];
-  if (MIDI.local){
+  {
     ensureAudio();
     const amp = .35 + .65 * (vel / 127);
     const spread = notes.length > 1 ? 1.2 / (notes.length - 1) : 0;
@@ -2216,9 +2212,32 @@ function padOff(n){
 function allPadsOff(){ Array.from(held.keys()).forEach(padOff); }
 
 /* ---- in: clock ---- */
-let clockLast = 0, clockAvg = 0, lastBpmPaint = 0;
+let clockLast = 0, clockAvg = 0, lastBpmPaint = 0, clockWatch = null;
+
+/* Clock source follows the cable now: the first 0xF8 takes over the tempo, and when the
+   pulses stop the transport goes back to its own clock. Nothing to remember to flip. */
+function setSync(mode){
+  if (MIDI.sync === mode) return;
+  MIDI.sync = mode;
+  if (mode === "ext"){
+    if (clockWatch == null){
+      clockWatch = setInterval(() => {
+        /* a bar at 50bpm is ~4.8s, but clock pulses are 24 per beat — a second of silence
+           means the source really has stopped, not that it's between beats */
+        if (performance.now() - clockLast > 1000) setSync("int");
+      }, 250);
+    }
+  } else {
+    if (clockWatch != null){ clearInterval(clockWatch); clockWatch = null; }
+    clockAvg = 0;
+  }
+  updateMeta();
+  if (MIDI.access) describe();
+}
+
 function onClock(){
   const now = performance.now();
+  setSync("ext");
   if (clockLast){
     const dt = now - clockLast;
     if (dt > 2 && dt < 200) clockAvg = clockAvg ? clockAvg * .88 + dt * .12 : dt;
@@ -2297,7 +2316,9 @@ function describe(){
   const ins = ports("inputs").length, outs = ports("outputs").length;
   say(ins + " input" + (ins === 1 ? "" : "s") + " · " + outs + " output" + (outs === 1 ? "" : "s")
     + " — white keys trigger chord slots (C4 = slot 1) and wrap in every octave. "
-    + "Set clock to <code>MIDI clock</code> to follow an external tempo.");
+    + (MIDI.sync === "ext"
+        ? "<b>Following external clock.</b> Use Offset to line it up against your gear."
+        : "Incoming MIDI clock is followed automatically."));
 }
 
 function bindInput(){
@@ -2343,18 +2364,6 @@ midiInSel.addEventListener("change", bindInput);
 midiOutSel.addEventListener("change", bindOutput);
 midiChSel.addEventListener("change", () => { midiPanic(); MIDI.ch = parseInt(midiChSel.value, 10); });
 
-$("#sync").addEventListener("click", e => {
-  const b = e.target.closest("button"); if (!b) return;
-  MIDI.sync = b.dataset.s;
-  $("#sync").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-  updateMeta();
-});
-$("#local").addEventListener("click", e => {
-  const b = e.target.closest("button"); if (!b) return;
-  MIDI.local = b.dataset.l === "on";
-  if (!MIDI.local) killAll();
-  $("#local").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-});
 
 function initMidi(){
   if (!navigator.requestMIDIAccess){
