@@ -122,6 +122,48 @@ the ring/silent switch doesn't mute it, and a 5ms preferred IO buffer — the ph
   Netlify and the phone. Export/import JSON to carry them.
 - The Claude Code Browser pane runs **hidden**, so `requestAnimationFrame` never fires
   there — anything rAF-driven can't be verified by DOM polling alone, only by screenshot.
+- **Intermittent clicks are not this app's fault.** Cost the better part of a day. See below.
+
+## The click investigation, so nobody repeats it
+
+Symptom: a click or crunch every 5–10 seconds while playing, sometimes clean for minutes.
+It is **not in the audio this app renders**, and no change to this code fixes it.
+
+macOS logs the cause directly:
+
+```bash
+/usr/bin/log show --last 10m --predicate 'process == "coreaudiod"' --style compact \
+  | grep -i overload
+```
+
+```
+cause: ClientProcessIsThrottled, ClientHALIODurationExceededBudget, SafetyViolationOccurred
+io_buffer_size: 512   sample_rate: 48000        # a 10.67ms budget per IO cycle
+HAL_client_IO_duration: 13.5ms / 36.5ms / 14.5ms  # the browser overran it every time
+safety_violation_sample_gap: 142 / 1759 / 681     # 3-37ms of audio missing = the click
+```
+
+The browser's audio render thread misses its deadline under system load, and CoreAudio
+punches a hole in the output *below* the Web Audio graph. Hence: present in Chrome and
+Safari alike, on every output device including built-in with no USB attached, absent from
+buffered media playback (YouTube), immune to `latencyHint` (a larger Web Audio buffer does
+not change the HAL's 512-frame IO cycle), and completely absent from a master-bus recording.
+An old Chromebook plays the same app cleanly, so the synth's render cost is not the issue.
+
+Things that are NOT the cause, each ruled out by measurement: clipping (level-independent,
+zero samples at full scale), the reverb (still clicks with the ConvolverNode disconnected),
+main-thread jank (zero stalls over 15ms), buffer size, MIDI, the phase lock, sample-rate
+mismatch, and the output device.
+
+If it returns, check system load first — `uptime`, and WindowServer / other apps in `ps` —
+before touching audio code. Stale HAL plug-ins in `/Library/Audio/Plug-Ins/HAL/` that
+predate a macOS upgrade are also worth clearing.
+
+**The method that got there** is worth more than the answer: `tools/build-capture-harness.py`
+records the master bus to a WAV *and* injects a known 1.5ms click on demand. Several
+automatic artefact detectors gave confident wrong answers before that control existed —
+one flagged 40 "discontinuities" in audio that was clean to the ear. Validate a detector
+against a known-bad case before believing what it says about a known-unknown.
 
 ## State of play
 
