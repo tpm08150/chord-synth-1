@@ -243,7 +243,7 @@ input[type="text"]::placeholder{color:#5a646a}
 .opt-row .silk{flex:0 0 auto;min-width:42px}
 .opt-row + .opt-row:not([hidden]){margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,.3)}
 .swing-hint{font-family:"DM Mono";font-size:10px;letter-spacing:.04em;color:#5f696f}
-.steps{display:flex;gap:4px;flex-wrap:wrap}
+.steps{display:grid;gap:4px;justify-content:start}
 .step{
   width:24px;height:26px;border-radius:3px;padding:0;cursor:pointer;
   background:var(--slot);border:1px solid #12161a;
@@ -293,8 +293,6 @@ input[type="text"]::placeholder{color:#5a646a}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--silk-dim);margin-top:14px}
 .legend span::before{content:"";display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:7px;background:var(--cap-red)}
 .legend span+span::before{background:var(--cap-yellow)}
-.hint{margin-top:16px;font-family:"DM Mono";font-size:10px;letter-spacing:.05em;color:#6d777e;line-height:1.7}
-kbd{background:#20262a;border:1px solid #12161a;border-radius:3px;padding:1px 5px;color:#a9b3b9;font-family:inherit;font-size:9.5px}
 
 /* ---------- midi & audio i/o ---------- */
 .sect{margin-top:20px;border-top:1px solid rgba(0,0,0,.4);box-shadow:0 -1px 0 rgba(255,255,255,.05);padding-top:16px}
@@ -512,9 +510,6 @@ body.learning .fader{cursor:crosshair}
     </div>
 
     <div class="legend"><span>Shape</span><span>Space &amp; output</span></div>
-    <div class="hint">
-      <kbd>space</kbd> play · <kbd>N</kbd> new progression · <kbd>1</kbd>–<kbd>9</kbd> hit a chord · drag a fader, or focus it and use arrow keys
-    </div>
   </div>
 
   <div class="sect">
@@ -1824,6 +1819,10 @@ function fillStepCounts(sel, cfg){
 }
 function renderSteps(el, cfg){
   el.innerHTML = "";
+  /* Anything over 8 splits into two equal rows rather than wrapping wherever the width
+     runs out — 16 reads as 2x8, which is also two beats per row. */
+  const cols = cfg.steps > 8 ? cfg.steps / 2 : cfg.steps;
+  el.style.gridTemplateColumns = "repeat(" + cols + ", auto)";
   const perBeat = cfg.steps / 4;
   for (let s = 0; s < cfg.steps; s++){
     const b = document.createElement("button");
