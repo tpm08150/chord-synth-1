@@ -5,9 +5,10 @@ SimpleHTTPRequestHandler sends Last-Modified but no Cache-Control, so Chrome
 applies heuristic freshness and will happily serve a stale page after an edit.
 """
 import http.server
+import os
 import socketserver
 
-PORT = 8123
+PORT = int(os.environ.get("PORT", 8123))
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):

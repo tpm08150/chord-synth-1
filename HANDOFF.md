@@ -25,6 +25,8 @@ ios/
   Sources/*.swift            canonical Swift; copied into Patchwork/Patchwork/ when changed
   build-test-harness.py      generates _iostest.html — the app + a mocked native side
   README.md                  bridge contract and Xcode setup
+tools/
+  build-phase-harness.py     generates _phasetest.html — the app + a synthetic MIDI clock
 Patchwork/                   the Xcode project (Xcode 16 synchronized groups)
 ```
 
@@ -35,9 +37,18 @@ copies them from the repo root into the bundle on every build.
 ## Running it
 
 ```bash
-python3 serve.py                  # http://localhost:8123/patchwork-chord-synth.html
-python3 ios/build-test-harness.py # then open _iostest.html to test MIDI without hardware
+python3 serve.py                    # http://localhost:8123/patchwork-chord-synth.html
+PORT=9000 python3 serve.py          # ...or anywhere else
+python3 ios/build-test-harness.py   # then open _iostest.html to test MIDI without hardware
+python3 tools/build-phase-harness.py  # _phasetest.html — synthetic clock + drift measurement
 ```
+
+`_phasetest.html` drives the app from a fake Web MIDI input and records what the app actually
+schedules, so drift is measured from oscillator times rather than from the app's own opinion
+of its accuracy. Press Play, then in the console: `__phase.start(120)`, and after a few
+minutes `__phase.slope()` for ms/min. `__phase.step(ms)` shoves the clock grid sideways to
+watch the loop pull it back. **It plays audio until you stop it** — `__phase.stop()` halts the
+clock, and the Play button still stops the transport.
 
 Web MIDI needs a secure context, so `file://` will not work — localhost or the Netlify URL.
 iOS builds need full Xcode (26.x for this device) and run to the phone from Xcode.
@@ -121,13 +132,35 @@ audio to the EP-133/EP-136, the iOS app on the phone, background/foreground reco
 - CoreMIDI device discovery beyond "it found the EP-133" — deeper paths are untested
 - MIDI learn on the phone
 - Clock drift over long takes; measured 54ms/min in a test rig whose own jitter accounts
-  for most of that
+  for most of that. See the phase lock section below — a synthetic clock generated on the
+  same machine can only ever show the ctx-vs-perf part of the skew, never a real device's
+  crystal, so the EP-133 run is the one that counts
 
-**Known limitation, deliberately left:** the transport *follows* clock tempo rather than
-phase-locking to it, so residual tempo error accumulates instead of being corrected. The
-Offset control compensates the constant part. If long takes creep, the fix is continuous
-phase correction against the pulse count — a real change, worth doing with measurements
-rather than pre-emptively.
+**Phase lock — implemented, off by default, not yet hardware-tested.** The transport used to
+only *follow* clock tempo, so residual tempo error accumulated. `phaseSample()` now measures
+where the grid sits against the incoming pulses and `phaseAdjust()` feeds that back into the
+length of the next chord. The `Lock` switch in the MIDI row turns the feedback on; the
+readout beside it shows live phase error and a fitted drift slope, and works with Lock off
+too, so it can be used to measure before deciding to correct.
+
+The root cause is worth knowing: tempo is measured from `performance.now()` timestamps but
+spent against the `ctx.currentTime` grid, and those are two different crystals. A rate
+mismatch between them becomes a tempo error that integrates forever. Simulated at 900ppm it
+reproduces the ~54ms/min figure below almost exactly.
+
+Measured so far — all without hardware, which is the gap:
+
+| | |
+| --- | --- |
+| Open loop, simulated 900ppm skew | −562ms at 10 min |
+| Proportional term only | −7.6ms standing offset — a P term cannot cancel a rate |
+| With the integral trim | ±2ms held over 10 min, insensitive to gain, skew and jitter |
+| Live in the browser rig, after lock | settles ±5ms, recovers from a disturbance at 5ms/s |
+
+Two knobs earned their values by measurement rather than taste: `maxAdj` is 10ms because 4ms
+took minutes to pull in and 20ms doubled the overshoot for little speed, and the integrator
+only accumulates while the proportional term is unsaturated — without that anti-windup a
+119ms pull-in overshot by 31ms and rang for 70 seconds.
 
 **Also unproven:** incoming MIDI crosses the bridge one `evaluateJavaScript` call per
 message. Clock alone is ~48/sec at 120bpm. If sync turns out jittery on hardware, batching

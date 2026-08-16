@@ -534,6 +534,14 @@ body.learning .fader{cursor:crosshair}
             <button id="offUp" aria-label="Play later">+</button>
           </div>
         </div>
+        <div style="display:flex;gap:7px;align-items:center">
+          <span class="silk">Lock</span>
+          <div class="seg" id="clockLock" role="group" aria-label="Phase-lock to MIDI clock">
+            <button data-l="off" class="on">Off</button>
+            <button data-l="on">On</button>
+          </div>
+          <output id="phaseOut" class="silk" style="min-width:112px">—</output>
+        </div>
       </div>
     </div>
 
@@ -932,8 +940,14 @@ const MIDI = {access:null, in:null, out:null, ch:0, sync:"int", clockOn:true};
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.platform)
             || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
 /* Shifts the transport's grid against incoming MIDI clock. Browser output latency puts
-   audible notes behind the reference by a fixed amount, and nothing else compensates. */
-const SYNC = {offsetMs:0};
+   audible notes behind the reference by a fixed amount, and nothing else compensates.
+   `offsetMs` is that constant, dialled in by hand; the phase fields below are the
+   time-varying part — following clock tempo alone lets position error integrate, because
+   a tempo estimate that is 0.1% off is a tenth of a bar out after a hundred bars.
+     pulse  counts 0xF8 since the last reset, so beat phase is pulse % 24
+     err    smoothed phase error in SECONDS, positive = transport running ahead
+     lock   whether that error is fed back into the grid, or only measured */
+const SYNC = {offsetMs:0, lock:false, pulse:0, err:0, have:false, trim:0, hist:[]};
 /* steps divide the bar, so 4/8/12/16 read as quarters, eighths, triplets, sixteenths */
 const PULSE = {steps:8, on:[1,0,1,1,0,1,1,0]};
 /* default is a single hit on the downbeat — i.e. the original one-note-per-bar bass */
@@ -1271,11 +1285,19 @@ function scheduleChord(i, t){
 }
 
 /* ---- transport ---- */
-let timer = null, nextTime = 0, nextIndex = 0, marks = [];
+/* gridBeats is the musical position of nextTime, in beats since playback started. Keeping
+   it alongside nextTime is what makes phase measurable at all: nextTime alone says when the
+   next chord lands, not where the grid thinks it is relative to anyone else's bar. */
+let timer = null, nextTime = 0, nextIndex = 0, marks = [], gridBeats = 0;
+const beatSeconds = () => barSeconds() / 4;
+/* Transport's musical position at an audio-clock time, interpolated back from the grid. */
+const beatsAt = t => gridBeats - (nextTime - t) / beatSeconds();
 function startPlay(){
   ensureAudio();
   state.playing = true;
   nextIndex = 0;
+  gridBeats = 0;
+  phaseReset();
   /* Just enough that the first chord isn't scheduled into the past — the tick runs every
      25ms. This used to be 80ms, which was the dominant term in the clock offset people
      had to dial out, and pure delay on the Play button besides. */
@@ -1294,10 +1316,14 @@ function tick(){
   const off = SYNC.offsetMs / 1000;
   while (nextTime + off < ctx.currentTime + .2 + Math.abs(off)){
     const at = Math.max(ctx.currentTime + .005, nextTime + off);
-    const dur = barSeconds() * chordBars(nextIndex);
+    const bars = chordBars(nextIndex);
+    const dur = barSeconds() * bars;
     scheduleChord(nextIndex, at);
     marks.push({i:nextIndex, t:at, end:at + dur});
-    nextTime += dur;
+    /* The grid advances by the exact musical length; the correction is applied to the
+       wall-clock step only, so gridBeats stays an honest count of beats played. */
+    nextTime += phaseAdjust(dur);
+    gridBeats += 4 * bars;
     nextIndex = (nextIndex + 1) % state.prog.chords.length;
   }
   /* quarter-bar pads burn through marks far faster than whole bars did */
@@ -1923,17 +1949,28 @@ for (let c = 0; c < 16; c++){
 midiChSel.value = "0";
 
 /* ---- out ---- */
+/* The two clocks: ctx.currentTime counts audio the graph has *accepted*, performance.now()
+   is wall time. getOutputTimestamp pairs them at the frame actually leaving the device, so
+   the base it gives already carries output latency — which is what both callers want. MIDI
+   out wants notes to land when the internal voice is audible, and the phase measurement
+   wants to compare what's heard against when clock pulses arrive. */
+function ctxPerfBase(){
+  if (ctx.getOutputTimestamp){
+    const ts = ctx.getOutputTimestamp();
+    if (ts && ts.contextTime != null && ts.performanceTime != null && ts.performanceTime > 0)
+      return ts.performanceTime - ts.contextTime * 1000;
+  }
+  return performance.now() - ctx.currentTime * 1000;
+}
 /* AudioContext time -> performance.now() time, the domain MIDIOutput.send expects */
 function perfTime(ctxTime){
   if (!ctx) return performance.now();
-  let base = null;
-  if (ctx.getOutputTimestamp){
-    const ts = ctx.getOutputTimestamp();
-    if (ts && ts.contextTime != null && ts.performanceTime != null)
-      base = ts.performanceTime - ts.contextTime * 1000;
-  }
-  if (base == null) base = performance.now() - ctx.currentTime * 1000;
-  return base + ctxTime * 1000;
+  return ctxPerfBase() + ctxTime * 1000;
+}
+/* and back the other way, for timestamping incoming clock onto the audio grid */
+function ctxTime(perfMs){
+  if (!ctx) return 0;
+  return (perfMs - ctxPerfBase()) / 1000;
 }
 
 /* A timestamped note-off lives in the browser's queue until its moment arrives — if the
@@ -2123,7 +2160,10 @@ function padTick(){
         a.recs.push(trigger(e.n, e.t, e.d, {bass:e.bass, gain:g, pan:e.pan, susAmt:e.susAmt}));
         sendNote(e.n, e.t, e.d, Math.round(e.vel * (a.vel / 127)));
       });
-      a.next += barSeconds() * chordBars(a.slot);
+      /* the rate half of the phase correction, but not the phase half — a held pad has its
+         own downbeat, set by when it was pressed, and shouldn't be dragged onto the
+         transport's. It should still run at the same tempo as it, though. */
+      a.next += barSeconds() * chordBars(a.slot) * (1 + (SYNC.lock ? SYNC.trim : 0));
     }
   });
 }
@@ -2225,9 +2265,97 @@ function setSync(mode){
   } else {
     if (clockWatch != null){ clearInterval(clockWatch); clockWatch = null; }
     clockTimes.length = 0;
+    phaseReset();     // the grid is ours again; the old error means nothing
   }
   updateMeta();
   if (MIDI.access) describe();
+}
+
+/* ---- phase ----
+   Tempo follow alone is an open loop: whatever the tempo estimate gets wrong, position
+   error integrates and never comes back. This closes it. Every pulse is a statement about
+   where the external beat grid is, so compare the transport's own position against it and
+   feed the difference back into the length of the next chord.
+
+   Error is wrapped to the nearest WHOLE BEAT, not the nearest pulse. Output latency and
+   whatever Offset is dialled in are a constant tens of ms; half a pulse is 10ms at 120bpm,
+   so locking to the nearest pulse would let that constant hop between neighbours and
+   dither. Half a beat is 250ms — comfortably clear of it. Bar-level alignment is Start's
+   job, not the loop's. */
+const PHASE = {
+  alpha: .05,     // per-pulse EMA — ~20 pulses, under a beat, well below the jitter
+  gain: .25,      // fraction of the remaining error taken out per chord
+  ki: .05,        // and the rate correction, see `trim` below
+  maxAdj: .01,    // ...and never more than 10ms, or 2% of a chunk, whichever is smaller.
+                  // 10ms on a 2s bar is 0.5%, well under audible, and pulls a worst-case
+                  // quarter-beat start error in about half a minute. 4ms was inaudible too
+                  // but took minutes; 20ms bought little speed for double the overshoot.
+  maxTrim: .005,  // 5000ppm, an order past any real crystal mismatch
+  maxErr: .45     // beats; beyond this the estimate is near the wrap and not trustworthy
+};
+function phaseReset(){
+  SYNC.pulse = 0; SYNC.err = 0; SYNC.have = false; SYNC.trim = 0;
+  SYNC.hist.length = 0;
+}
+/* One pulse arrived at wall time `now`: where is the transport against it? */
+function phaseSample(now){
+  if (!ctx || !state.playing || !state.prog) return;
+  const beat = beatSeconds();
+  if (!(beat > 0)) return;
+  /* both sides in beats, so the difference wraps at 1 */
+  const diff = beatsAt(ctxTime(now)) - SYNC.pulse / 24;
+  const wrapped = diff - Math.round(diff);
+  const err = wrapped * beat;
+  if (!SYNC.have){ SYNC.err = err; SYNC.have = true; }
+  else SYNC.err += PHASE.alpha * (err - SYNC.err);
+
+  /* One sample a second, two minutes deep — enough to fit a slope through, short enough
+     that it forgets a transient instead of averaging it in forever. */
+  const h = SYNC.hist;
+  if (!h.length || now - h[h.length - 1].t > 1000){
+    h.push({t:now, e:SYNC.err});
+    if (h.length > 120) h.shift();
+  }
+}
+/* The length to actually give the next chord. Returns `dur` untouched whenever the loop
+   shouldn't be closed — free-running, clock ignored, no estimate yet, or an error big enough
+   that it's a re-sync rather than drift, where a lurch would be worse than staying put.
+
+   Two terms, because there are two different faults to correct:
+     nudge  proportional — pulls an existing phase error back to zero
+     trim   integral — the disturbance is a RATE error (tempo is measured off
+            performance.now() but spent against ctx.currentTime, and those are two
+            different crystals), and proportional feedback can only cancel a rate by
+            standing at a permanent offset. Simulated at 900ppm skew that offset is 7ms;
+            the trim absorbs the rate instead and leaves the error itself at zero. */
+function phaseAdjust(dur){
+  if (!SYNC.lock || !SYNC.have || !MIDI.clockOn || MIDI.sync !== "ext") return dur;
+  if (Math.abs(SYNC.err) > PHASE.maxErr * beatSeconds()) return dur;
+  const cap = Math.min(dur * .02, PHASE.maxAdj);
+  const want = SYNC.err * PHASE.gain;
+  const nudge = Math.max(-cap, Math.min(cap, want));
+  /* Anti-windup: while the nudge is clamped, the loop is correcting as fast as it is
+     allowed to rather than as fast as the error asks, and the integrator can't tell those
+     apart — it would wind up on the way in and have to unwind past zero on the far side.
+     Measured as a 31ms overshoot on a 119ms pull-in. So integrate only when not saturated. */
+  if (Math.abs(want) <= cap)
+    SYNC.trim = Math.max(-PHASE.maxTrim,
+                Math.min(PHASE.maxTrim, SYNC.trim + PHASE.ki * SYNC.err / dur));
+  return dur * (1 + SYNC.trim) + nudge;
+}
+/* Drift is the slope, not the offset: a constant error is what Offset exists for. Fitted
+   over the trailing window rather than measured against a fixed starting point, so that
+   whatever the error was doing a few minutes ago stops counting — an endpoint reference
+   reported a pull-in transient as a -68 ms/min drift long after the loop had settled. */
+function phaseDrift(){
+  const h = SYNC.hist, n = h.length;
+  if (n < 20 || h[n - 1].t - h[0].t < 30000) return null;
+  let mx = 0, my = 0;
+  for (const p of h){ mx += p.t; my += p.e; }
+  mx /= n; my /= n;
+  let num = 0, den = 0;
+  for (const p of h){ num += (p.t - mx) * (p.e - my); den += (p.t - mx) ** 2; }
+  return den ? num / den * 60000 * 1000 : null;   // seconds per ms -> ms per minute
 }
 
 /* Tempo comes from a long window rather than smoothed single intervals. One 24ppqn pulse
@@ -2240,6 +2368,9 @@ function onClock(){
   setSync("ext");
   clockLast = now;
 
+  phaseSample(now);
+  SYNC.pulse++;
+
   clockTimes.push(now);
   if (clockTimes.length > 97) clockTimes.shift();     // four beats at 24ppqn
 
@@ -2249,6 +2380,7 @@ function onClock(){
     const perPulse = (clockTimes[span] - clockTimes[0]) / span;   // ms
     const bpm = 60000 / (perPulse * 24);
     if (bpm >= 40 && bpm <= 250) setBpm(bpm, true);
+    paintPhase();
   }
 }
 
@@ -2350,6 +2482,29 @@ $("#clockEn").addEventListener("click", e => {
   if (!MIDI.clockOn) setSync("int");     // drop straight back to the internal clock
 });
 
+const phaseOut = $("#phaseOut");
+function setClockLock(on){
+  SYNC.lock = !!on;
+  $("#clockLock").querySelectorAll("button")
+    .forEach(x => x.classList.toggle("on", (x.dataset.l === "on") === SYNC.lock));
+  paintPhase();
+}
+$("#clockLock").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  setClockLock(b.dataset.l === "on");
+  /* Measure the new regime from here — the drift figure is a slope, and fitting it across
+     the moment the loop closed would report neither the open- nor the closed-loop number. */
+  SYNC.hist.length = 0;
+  SYNC.trim = 0;
+});
+/* Live phase error, and the drift slope once there's enough window to mean anything. */
+function paintPhase(){
+  if (MIDI.sync !== "ext" || !SYNC.have){ phaseOut.textContent = "—"; return; }
+  const ms = SYNC.err * 1000, d = phaseDrift();
+  phaseOut.textContent = (ms > 0 ? "+" : "") + ms.toFixed(1) + " ms"
+    + (d == null ? "" : "  ·  " + (d > 0 ? "+" : "") + d.toFixed(0) + "/min");
+}
+
 const offOut = $("#offOut");
 function setClockOffset(ms){
   SYNC.offsetMs = Math.max(-200, Math.min(200, Math.round(ms / 5) * 5));
@@ -2358,6 +2513,7 @@ function setClockOffset(ms){
 $("#offDown").addEventListener("click", () => setClockOffset(SYNC.offsetMs - 5));
 $("#offUp").addEventListener("click", () => setClockOffset(SYNC.offsetMs + 5));
 setClockOffset(0);
+setClockLock(false);
 
 $("#panic").addEventListener("click", () => {
   if (state.playing) stopPlay();   // no point silencing if the sequencer refills it
@@ -2570,6 +2726,7 @@ function snapshot(){
     bassSeq:{steps:BASSQ.steps, on:BASSQ.on.slice()},
     swing:SW.ratio,
     clockOffset:SYNC.offsetMs,
+    clockLock:SYNC.lock,
     prog:state.prog ? {
       mood:state.prog.mood, minor:!!state.prog.minor,
       chords:state.prog.chords.map(c => ({r:c.r, q:c.q, bars:c.bars || 1}))
@@ -2652,6 +2809,7 @@ function restore(s){
   if (!SWING_OPTS.some(o => o[0] === SW.ratio)){ SW.ratio = .5; swingSel.value = "0.5"; }
 
   setClockOffset(clamp(s.clockOffset, -200, 200, 0));
+  setClockLock(s.clockLock === true);       // absent in older patches, which predate it
   setBpm(clamp(s.bpm, 50, 180, 88));
 
   /* Rebuild the progression from its chords; anything unusable falls back to a fresh one. */
