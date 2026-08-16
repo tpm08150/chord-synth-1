@@ -536,6 +536,14 @@ body.learning .fader{cursor:crosshair}
           <button data-s="int" class="on">Int clock</button>
           <button data-s="ext">MIDI clock</button>
         </div>
+        <div style="display:flex;gap:7px;align-items:center">
+          <span class="silk">Offset</span>
+          <div class="tempo" style="width:126px">
+            <button id="offDown" aria-label="Play earlier">−</button>
+            <output id="offOut">0 ms</output>
+            <button id="offUp" aria-label="Play later">+</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -934,6 +942,11 @@ function normBass(v){
   return {on:true, sus:null};
 }
 const MIDI = {access:null, in:null, out:null, ch:0, local:true, sync:"int"};
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.platform)
+            || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
+/* Shifts the transport's grid against incoming MIDI clock. Browser output latency puts
+   audible notes behind the reference by a fixed amount, and nothing else compensates. */
+const SYNC = {offsetMs:0};
 /* steps divide the bar, so 4/8/12/16 read as quarters, eighths, triplets, sixteenths */
 const PULSE = {steps:8, on:[1,0,1,1,0,1,1,0]};
 /* default is a single hit on the downbeat — i.e. the original one-note-per-bar bass */
@@ -1274,10 +1287,15 @@ function startPlay(){
   requestAnimationFrame(paint);
 }
 function tick(){
-  while (nextTime < ctx.currentTime + .2){
+  /* nextTime is the musical grid; `off` shifts what's actually scheduled against it, so a
+     negative offset pulls playback ahead of an external clock. Lookahead is widened by the
+     offset so a negative shift can't ask for a time that has already passed. */
+  const off = SYNC.offsetMs / 1000;
+  while (nextTime + off < ctx.currentTime + .2 + Math.abs(off)){
+    const at = Math.max(ctx.currentTime + .005, nextTime + off);
     const dur = barSeconds() * chordBars(nextIndex);
-    scheduleChord(nextIndex, nextTime);
-    marks.push({i:nextIndex, t:nextTime, end:nextTime + dur});
+    scheduleChord(nextIndex, at);
+    marks.push({i:nextIndex, t:at, end:at + dur});
     nextTime += dur;
     nextIndex = (nextIndex + 1) % state.prog.chords.length;
   }
@@ -2287,6 +2305,15 @@ function bindOutput(){
   MIDI.out = midiOutSel.value ? ports("outputs").find(p => p.id === midiOutSel.value) || null : null;
 }
 
+const offOut = $("#offOut");
+function setClockOffset(ms){
+  SYNC.offsetMs = Math.max(-200, Math.min(200, Math.round(ms / 5) * 5));
+  offOut.textContent = (SYNC.offsetMs > 0 ? "+" : "") + SYNC.offsetMs + " ms";
+}
+$("#offDown").addEventListener("click", () => setClockOffset(SYNC.offsetMs - 5));
+$("#offUp").addEventListener("click", () => setClockOffset(SYNC.offsetMs + 5));
+setClockOffset(0);
+
 $("#panic").addEventListener("click", () => {
   if (state.playing) stopPlay();   // no point silencing if the sequencer refills it
   allPadsOff();
@@ -2325,9 +2352,7 @@ function initMidi(){
   if (!navigator.requestMIDIAccess){
     /* Every iOS browser is WebKit underneath, so this is a platform limit rather than a
        browser choice — naming Safari 18 here misleads anyone reading it on a phone. */
-    const ios = /iPad|iPhone|iPod/.test(navigator.platform)
-      || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
-    say(ios
+    say(IS_IOS
       ? "Web MIDI isn't available on iOS or iPadOS — every browser there uses WebKit, so "
         + "switching browsers won't help. Everything else works; MIDI needs a desktop."
       : "Web MIDI isn't available in this browser. Chrome and Edge support it, and Firefox "
@@ -2435,7 +2460,13 @@ function fillDev(sel, devs, noneLabel, keep, fallback){
 
 async function scanDevices(){
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices){
-    ioSay("This browser can't enumerate audio devices.", true);
+    /* Not a failure on iOS — WebKit exposes no device picker because routing is a system
+       concern there. Output already follows the system device, so saying "can't
+       enumerate" reads as broken when it's working exactly as the platform intends. */
+    ioSay(IS_IOS
+      ? "iOS routes audio at the system level, so there's no in-page picker. Output follows "
+        + "the system output — choose the EP-133 in Control Centre and this follows it."
+      : "This browser can't enumerate audio devices.", !IS_IOS);
     return;
   }
   /* device labels stay blank until mic permission is granted once */
@@ -2602,6 +2633,7 @@ function snapshot(){
     pulse:{steps:PULSE.steps, on:PULSE.on.slice()},
     bassSeq:{steps:BASSQ.steps, on:BASSQ.on.slice()},
     swing:SW.ratio,
+    clockOffset:SYNC.offsetMs,
     prog:state.prog ? {
       mood:state.prog.mood, minor:!!state.prog.minor,
       chords:state.prog.chords.map(c => ({r:c.r, q:c.q, bars:c.bars || 1}))
@@ -2683,6 +2715,7 @@ function restore(s){
   swingSel.value = SWING_OPTS.some(o => o[0] === SW.ratio) ? String(SW.ratio) : ".5";
   if (!SWING_OPTS.some(o => o[0] === SW.ratio)){ SW.ratio = .5; swingSel.value = "0.5"; }
 
+  setClockOffset(clamp(s.clockOffset, -200, 200, 0));
   setBpm(clamp(s.bpm, 50, 180, 88));
 
   /* Rebuild the progression from its chords; anything unusable falls back to a fresh one. */
@@ -2741,7 +2774,15 @@ $("#patchDelete").addEventListener("click", () => {
   const store = loadStore();
   delete store[name];
   if (!saveStore(store)) return;
-  refreshPatchList();
+  if (IS_IOS){
+  audioOutSel.disabled = true;
+  audioInSel.disabled = true;
+  $("#scan").disabled = true;
+  ioSay("iOS routes audio at the system level, so there's no in-page picker. Output "
+      + "follows the system output — choose the EP-133 in Control Centre and this follows it.");
+}
+
+refreshPatchList();
   patchSay("Deleted <b>" + name + "</b>.");
 });
 
