@@ -65,6 +65,7 @@ iOS builds need full Xcode (26.x for this device) and run to the phone from Xcod
 | Held MIDI pads | `padTick()` — separate scheduler for pads held down |
 | Params | `P` (faders), `state`, `MIDI`, `ARP`, `PULSE`, `BASSQ`, `SW`, `SYNC` |
 | Patches | `snapshot()` / `restore()`, `PATCH_VERSION`, `TONE_RANGES` |
+| Patch recall by MIDI | `patchNotes`, `progMap`, `RECALL`, `queueRecall()`, `takePending()` |
 
 ### Design decisions worth not undoing
 
