@@ -2481,15 +2481,23 @@ function closeInput(){
 }
 
 /* rAF is paused while the tab is hidden; pick the meter back up when it returns */
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return;
-  if (inAnalyser) startMeter();
-  /* iOS interrupts the context on an app switch or a call and does not restore it */
-  if (ctx && ctx.state !== "running" && state.playing){
+/* Also called from the iOS host when the app returns to the foreground, since a WKWebView
+   doesn't reliably get a visibilitychange for that. */
+window.__patchworkResume = function(){
+  if (!ctx) return;
+  if (ctx.state !== "running"){
     const p = ctx.resume();
     if (p && p.catch) p.catch(() => {});
   }
   ioStats();
+};
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (inAnalyser) startMeter();
+  /* was gated on state.playing, which meant returning to a stopped app left the context
+     interrupted and the pads silent until something else happened to resume it */
+  window.__patchworkResume();
 });
 
 /* Safety net: any tap re-resumes an existing context. Deliberately does not create one —

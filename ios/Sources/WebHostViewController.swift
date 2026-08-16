@@ -1,5 +1,6 @@
 import UIKit
 import WebKit
+import AVFoundation
 
 /// Hosts the synth's HTML in a WKWebView and wires `midi-bridge.js` to CoreMIDI.
 ///
@@ -57,12 +58,48 @@ final class WebHostViewController: UIViewController, WKScriptMessageHandler, WKN
         }
         midi.start()
 
+        // Coming back from another app: the session may have been deactivated and MIDI
+        // connections dropped, and the page's AudioContext left suspended. None of that
+        // recovers on its own — without this the app is silent until it's relaunched.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appBecameActive),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(audioInterrupted(_:)),
+            name: AVAudioSession.interruptionNotification, object: nil)
+
         guard let page = Bundle.main.url(forResource: "patchwork-chord-synth", withExtension: "html") else {
             assertionFailure("patchwork-chord-synth.html is missing from the bundle")
             return
         }
         webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
     }
+
+    // MARK: - lifecycle
+
+    @objc private func appBecameActive() {
+        AudioSession.reactivate()
+        midi.refresh()                    // re-enumerate; endpoints may have changed while away
+        resumeWebAudio()
+    }
+
+    @objc private func audioInterrupted(_ note: Notification) {
+        guard let info = note.userInfo,
+              let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        if type == .ended {
+            AudioSession.reactivate()
+            resumeWebAudio()
+        }
+    }
+
+    /// Nudge the page's AudioContext. iOS leaves it "interrupted" after a call or an app
+    /// switch, and WebKit does not restore it by itself.
+    private func resumeWebAudio() {
+        eval("window.__patchworkResume && window.__patchworkResume();")
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     // MARK: - JS -> native
 
