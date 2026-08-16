@@ -1024,6 +1024,14 @@ function ensureAudio(){
     const p = ctx.resume();
     if (p && p.catch) p.catch(() => {});
   }
+  /* Every other ioStats() call sits on a device-picker path, and those are disabled on
+     iOS — so without this the stats line never appears on the one platform where it's
+     the only way to read latency. Repeat once the context is actually running, since
+     outputLatency isn't meaningful until then. */
+  if (typeof ioStats === "function"){
+    ioStats();
+    setTimeout(ioStats, 400);
+  }
   return ctx.state;
 }
 
